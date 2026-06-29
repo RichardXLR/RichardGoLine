@@ -1,0 +1,10 @@
+README.md
+RichardGoLine.py
+RichardGoLine_GUI.py
+setup.py
+RichardGoLine.egg-info/PKG-INFO
+RichardGoLine.egg-info/SOURCES.txt
+RichardGoLine.egg-info/dependency_links.txt
+RichardGoLine.egg-info/entry_points.txt
+RichardGoLine.egg-info/requires.txt
+RichardGoLine.egg-info/top_level.txt

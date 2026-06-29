@@ -1,0 +1,17 @@
+#!/bin/bash
+# RichardGoLine - Wrapper script para execução fácil
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_SCRIPT="$SCRIPT_DIR/RichardGoLine.py"
+
+# Verifica se o script Python existe
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+    echo "❌ RichardGoLine.py não encontrado em $SCRIPT_DIR"
+    exit 1
+fi
+
+# Torna executável se não for
+chmod +x "$PYTHON_SCRIPT"
+
+# Executa com python3
+exec python3 "$PYTHON_SCRIPT" "$@"

@@ -1,0 +1,12 @@
+#!/bin/bash
+# RichardGoLine GUI - Wrapper script
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_SCRIPT="$SCRIPT_DIR/RichardGoLine_GUI.py"
+
+if [[ ! -f "$PYTHON_SCRIPT" ]]; then
+    echo "❌ RichardGoLine_GUI.py não encontrado em $SCRIPT_DIR"
+    exit 1
+fi
+
+exec python3 "$PYTHON_SCRIPT" "$@"

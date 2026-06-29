@@ -1,0 +1,3 @@
+[console_scripts]
+RichardGoLine = RichardGoLine:main
+RichardGoLine_GUI = RichardGoLine_GUI:main

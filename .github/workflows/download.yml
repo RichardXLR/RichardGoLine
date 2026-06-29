@@ -1,0 +1,545 @@
+name: 📥 RichardGoLine - YouTube Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL do YouTube (vídeo, playlist, canal, Shorts, Music)'
+        required: true
+        type: string
+      mode:
+        description: 'Modo de download'
+        required: true
+        type: choice
+        options:
+          - bestvideo+bestaudio (Máxima qualidade - MKV)
+          - bestaudio (Apenas áudio - MP3/Opus/FLAC)
+          - bestvideo (Apenas vídeo - sem áudio)
+          - 1080p (Full HD - MP4)
+          - 720p (HD - MP4)
+          - 4k (2160p - MKV)
+          - formato-customizado (ID manual)
+      audio_format:
+        description: 'Formato de áudio (modo áudio)'
+        required: false
+        default: 'opus'
+        type: choice
+        options: [opus, mp3, flac, m4a, wav, vorbis, aac]
+      audio_quality:
+        description: 'Qualidade áudio (0=melhor, 5=padrão, 10=pior)'
+        required: false
+        default: '0'
+        type: choice
+        options: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10']
+      custom_format:
+        description: 'Format ID (ex: 313+251, 137+140) - só se "formato-customizado"'
+        required: false
+        type: string
+      sponsorblock:
+        description: 'Remover patrocínios/intros/outros'
+        required: false
+        default: true
+        type: boolean
+      subtitles:
+        description: 'Baixar legendas'
+        required: false
+        default: false
+        type: boolean
+      sub_langs:
+        description: 'Idiomas legendas (ex: pt,en,es)'
+        required: false
+        default: 'pt,en'
+        type: string
+      thumbnail:
+        description: 'Baixar thumbnail'
+        required: false
+        default: false
+        type: boolean
+      metadata:
+        description: 'Embed metadata + thumbnail no arquivo'
+        required: false
+        default: false
+        type: boolean
+      concurrent:
+        description: 'Fragments paralelos (1-16, mais=rápido)'
+        required: false
+        default: '8'
+        type: choice
+        options: ['1', '2', '4', '8', '16']
+      throttle:
+        description: 'Limite velocidade (ex: 5M, 10M, vazio=ilimitado)'
+        required: false
+        default: ''
+        type: string
+      playlist_items:
+        description: 'Itens playlist (ex: 1,3,5-10)'
+        required: false
+        default: ''
+        type: string
+      date_after:
+        description: 'Só vídeos após data (YYYYMMDD)'
+        required: false
+        default: ''
+        type: string
+
+  # Permite trigger via API externa (curl, apps, bots)
+  repository_dispatch:
+    types: [download-request]
+
+permissions:
+  contents: read
+  actions: write
+  attestations: write
+  id-token: write
+
+env:
+  RETENTION_DAYS: 7
+  MAX_FILESIZE: 1900M  # Limite GitHub artifact ~2GB
+
+jobs:
+  validate:
+    name: ✅ Validar Entrada
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.parse.outputs.url }}
+      mode: ${{ steps.parse.outputs.mode }}
+      audio_format: ${{ steps.parse.outputs.audio_format }}
+      audio_quality: ${{ steps.parse.outputs.audio_quality }}
+      custom_format: ${{ steps.parse.outputs.custom_format }}
+      sponsorblock: ${{ steps.parse.outputs.sponsorblock }}
+      subtitles: ${{ steps.parse.outputs.subtitles }}
+      sub_langs: ${{ steps.parse.outputs.sub_langs }}
+      thumbnail: ${{ steps.parse.outputs.thumbnail }}
+      metadata: ${{ steps.parse.outputs.metadata }}
+      concurrent: ${{ steps.parse.outputs.concurrent }}
+      throttle: ${{ steps.parse.outputs.throttle }}
+      playlist_items: ${{ steps.parse.outputs.playlist_items }}
+      date_after: ${{ steps.parse.outputs.date_after }}
+      artifact_name: ${{ steps.parse.outputs.artifact_name }}
+    steps:
+      - name: 🔍 Parse Inputs
+        id: parse
+        run: |
+          # Determina source: workflow_dispatch ou repository_dispatch
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            URL="${{ github.event.client_payload.url }}"
+            MODE="${{ github.event.client_payload.mode }}"
+            AUDIO_FMT="${{ github.event.client_payload.audio_format }}"
+            AUDIO_QUAL="${{ github.event.client_payload.audio_quality }}"
+            CUSTOM_FMT="${{ github.event.client_payload.custom_format }}"
+            SPONSOR="${{ github.event.client_payload.sponsorblock }}"
+            SUBTITLES="${{ github.event.client_payload.subtitles }}"
+            SUB_LANGS="${{ github.event.client_payload.sub_langs }}"
+            THUMB="${{ github.event.client_payload.thumbnail }}"
+            META="${{ github.event.client_payload.metadata }}"
+            CONCURRENT="${{ github.event.client_payload.concurrent }}"
+            THROTTLE="${{ github.event.client_payload.throttle }}"
+            PL_ITEMS="${{ github.event.client_payload.playlist_items }}"
+            DATE_AFTER="${{ github.event.client_payload.date_after }}"
+          else
+            URL="${{ github.event.inputs.url }}"
+            MODE="${{ github.event.inputs.mode }}"
+            AUDIO_FMT="${{ github.event.inputs.audio_format }}"
+            AUDIO_QUAL="${{ github.event.inputs.audio_quality }}"
+            CUSTOM_FMT="${{ github.event.inputs.custom_format }}"
+            SPONSOR="${{ github.event.inputs.sponsorblock }}"
+            SUBTITLES="${{ github.event.inputs.subtitles }}"
+            SUB_LANGS="${{ github.event.inputs.sub_langs }}"
+            THUMB="${{ github.event.inputs.thumbnail }}"
+            META="${{ github.event.inputs.metadata }}"
+            CONCURRENT="${{ github.event.inputs.concurrent }}"
+            THROTTLE="${{ github.event.inputs.throttle }}"
+            PL_ITEMS="${{ github.event.inputs.playlist_items }}"
+            DATE_AFTER="${{ github.event.inputs.date_after }}"
+          fi
+
+          # Valida URL
+          if [ -z "$URL" ] || [[ ! "$URL" =~ ^https?:// ]]; then
+            echo "❌ URL inválida: $URL"
+            exit 1
+          fi
+
+          # Sanitiza nome do artifact
+          SAFE_URL=$(echo "$URL" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-50)
+          ARTIFACT_NAME="rgl-${SAFE_URL}-${{ github.run_id }}"
+
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
+          echo "audio_format=$AUDIO_FMT" >> $GITHUB_OUTPUT
+          echo "audio_quality=$AUDIO_QUAL" >> $GITHUB_OUTPUT
+          echo "custom_format=$CUSTOM_FMT" >> $GITHUB_OUTPUT
+          echo "sponsorblock=$SPONSOR" >> $GITHUB_OUTPUT
+          echo "subtitles=$SUBTITLES" >> $GITHUB_OUTPUT
+          echo "sub_langs=$SUB_LANGS" >> $GITHUB_OUTPUT
+          echo "thumbnail=$THUMB" >> $GITHUB_OUTPUT
+          echo "metadata=$META" >> $GITHUB_OUTPUT
+          echo "concurrent=$CONCURRENT" >> $GITHUB_OUTPUT
+          echo "throttle=$THROTTLE" >> $GITHUB_OUTPUT
+          echo "playlist_items=$PL_ITEMS" >> $GITHUB_OUTPUT
+          echo "date_after=$DATE_AFTER" >> $GITHUB_OUTPUT
+          echo "artifact_name=$ARTIFACT_NAME" >> $GITHUB_OUTPUT
+
+          echo "✅ Inputs validados"
+          echo "🔗 URL: $URL"
+          echo "🎯 Modo: $MODE"
+
+  download:
+    name: 📥 Baixar (Tentativa 1/3)
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python + Cache
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
+
+      - name: 📦 Instalar Dependências
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg atomicparsley
+          pip install -q --upgrade yt-dlp[default]
+
+      - name: ⬇️ Download
+        id: dl
+        env:
+          URL: ${{ needs.validate.outputs.url }}
+          MODE: ${{ needs.validate.outputs.mode }}
+          AUDIO_FMT: ${{ needs.validate.outputs.audio_format }}
+          AUDIO_QUAL: ${{ needs.validate.outputs.audio_quality }}
+          CUSTOM_FMT: ${{ needs.validate.outputs.custom_format }}
+          SPONSOR: ${{ needs.validate.outputs.sponsorblock }}
+          SUBTITLES: ${{ needs.validate.outputs.subtitles }}
+          SUB_LANGS: ${{ needs.validate.outputs.sub_langs }}
+          THUMB: ${{ needs.validate.outputs.thumbnail }}
+          META: ${{ needs.validate.outputs.metadata }}
+          CONCURRENT: ${{ needs.validate.outputs.concurrent }}
+          THROTTLE: ${{ needs.validate.outputs.throttle }}
+          PL_ITEMS: ${{ needs.validate.outputs.playlist_items }}
+          DATE_AFTER: ${{ needs.validate.outputs.date_after }}
+        run: |
+          set -euo pipefail
+          
+          mkdir -p downloads
+          cd downloads
+          
+          # Build yt-dlp command
+          CMD=(yt-dlp
+            --concurrent-fragments "$CONCURRENT"
+            --retries 10
+            --fragment-retries 10
+            --no-warnings
+            --max-filesize ${{ env.MAX_FILESIZE }}
+          )
+          
+          # Throttle
+          if [ -n "$THROTTLE" ]; then
+            CMD+=(--throttled-rate "$THROTTLE")
+          fi
+          
+          # SponsorBlock
+          if [ "$SPONSOR" = "true" ]; then
+            CMD+=(--sponsorblock-remove all)
+          fi
+          
+          # Legendas
+          if [ "$SUBTITLES" = "true" ]; then
+            CMD+=(--write-subs --write-auto-subs --sub-langs "$SUB_LANGS")
+          fi
+          
+          # Thumbnail
+          if [ "$THUMB" = "true" ]; then
+            CMD+=(--write-thumbnail)
+          fi
+          
+          # Metadados
+          if [ "$META" = "true" ]; then
+            CMD+=(--add-metadata --embed-thumbnail)
+          fi
+          
+          # Playlist items
+          if [ -n "$PL_ITEMS" ]; then
+            CMD+=(--playlist-items "$PL_ITEMS")
+          fi
+          
+          # Date filter
+          if [ -n "$DATE_AFTER" ]; then
+            CMD+=(--dateafter "$DATE_AFTER")
+          fi
+          
+          # Output template
+          CMD+=(-o "%(title)s [%(id)s].%(ext)s")
+          
+          # Mode selection
+          case "$MODE" in
+            "bestaudio"*)
+              CMD+=(-f "bestaudio/best" -x --audio-format "$AUDIO_FMT" --audio-quality "$AUDIO_QUAL")
+              ;;
+            "bestvideo"*)
+              if [ "$MODE" = "bestvideo (Apenas vídeo - sem áudio)" ]; then
+                CMD+=(-f "bestvideo/best")
+              elif [[ "$MODE" =~ ^[0-9]+p$ ]]; then
+                HEIGHT=${MODE%p}
+                CMD+=(-f "bestvideo[height<=$HEIGHT]+bestaudio/best[height<=$HEIGHT]" --merge-output-format mp4)
+              elif [ "$MODE" = "4k (2160p - MKV)" ]; then
+                CMD+=(-f "bestvideo[height<=2160]+bestaudio/best[height<=2160]" --merge-output-format mkv)
+              else
+                CMD+=(-f "bestvideo+bestaudio/best" --merge-output-format mkv)
+              fi
+              ;;
+            "formato-customizado"*)
+              if [ -z "$CUSTOM_FMT" ]; then
+                echo "❌ Formato customizado requer custom_format"
+                exit 1
+              fi
+              CMD+=(-f "$CUSTOM_FMT")
+              ;;
+            *)
+              CMD+=(-f "bestvideo+bestaudio/best" --merge-output-format mkv)
+              ;;
+          esac
+          
+          CMD+=("$URL")
+          
+          echo "🚀 Executando: ${CMD[*]}"
+          "${CMD[@]}"
+          
+          echo "✅ Download concluído"
+          echo "files=$(find . -type f -printf '%f\n' | jq -R -s -c 'split("\n")[:-1]')" >> $GITHUB_OUTPUT
+
+      - name: 📋 Listar Arquivos
+        if: success()
+        run: |
+          cd downloads
+          echo "📁 Arquivos baixados:"
+          find . -type f -exec ls -lh {} \;
+          echo ""
+          echo "📊 Total: $(du -sh .)"
+
+      - name: 📤 Upload Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.artifact_name }}
+          path: downloads/**
+          retention-days: ${{ env.RETENTION_DAYS }}
+          compression-level: 6
+          if-no-files-found: error
+
+      - name: 📝 Job Summary
+        if: always()
+        run: |
+          echo "## 📥 RichardGoLine - Download Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **URL** | \`${{ needs.validate.outputs.url }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Modo** | ${{ needs.validate.outputs.mode }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Tentativa** | ${{ matrix.attempt }}/3 |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Artifact** | \`${{ needs.validate.outputs.artifact_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Expira em** | ${{ env.RETENTION_DAYS }} dias |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 Como baixar:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Via gh CLI:" >> $GITHUB_STEP_SUMMARY
+          echo "gh run download ${{ github.run_id }} --dir ./output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Ou acesse a aba **Artifacts** neste run." >> $GITHUB_STEP_SUMMARY
+
+  retry-2:
+    name: 🔁 Retry 2/3
+    needs: [validate, download]
+    if: failure() && needs.download.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: ⏳ Aguardar antes de retry
+        run: sleep 60
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: 📦 Instalar
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -q --upgrade yt-dlp[default]
+      - name: ⬇️ Download (Retry 2)
+        env:
+          URL: ${{ needs.validate.outputs.url }}
+          MODE: ${{ needs.validate.outputs.mode }}
+          AUDIO_FMT: ${{ needs.validate.outputs.audio_format }}
+          AUDIO_QUAL: ${{ needs.validate.outputs.audio_quality }}
+          CUSTOM_FMT: ${{ needs.validate.outputs.custom_format }}
+          SPONSOR: ${{ needs.validate.outputs.sponsorblock }}
+          SUBTITLES: ${{ needs.validate.outputs.subtitles }}
+          SUB_LANGS: ${{ needs.validate.outputs.sub_langs }}
+          THUMB: ${{ needs.validate.outputs.thumbnail }}
+          META: ${{ needs.validate.outputs.metadata }}
+          CONCURRENT: ${{ needs.validate.outputs.concurrent }}
+          THROTTLE: ${{ needs.validate.outputs.throttle }}
+          PL_ITEMS: ${{ needs.validate.outputs.playlist_items }}
+          DATE_AFTER: ${{ needs.validate.outputs.date_after }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloads && cd downloads
+          CMD=(yt-dlp --concurrent-fragments "${{ needs.validate.outputs.concurrent }}" --retries 15 --fragment-retries 15 --no-warnings --max-filesize ${{ env.MAX_FILESIZE }})
+          if [ -n "${{ needs.validate.outputs.throttle }}" ]; then CMD+=(--throttled-rate "${{ needs.validate.outputs.throttle }}"); fi
+          if [ "${{ needs.validate.outputs.sponsorblock }}" = "true" ]; then CMD+=(--sponsorblock-remove all); fi
+          if [ "${{ needs.validate.outputs.subtitles }}" = "true" ]; then CMD+=(--write-subs --write-auto-subs --sub-langs "${{ needs.validate.outputs.sub_langs }}"); fi
+          if [ "${{ needs.validate.outputs.thumbnail }}" = "true" ]; then CMD+=(--write-thumbnail); fi
+          if [ "${{ needs.validate.outputs.metadata }}" = "true" ]; then CMD+=(--add-metadata --embed-thumbnail); fi
+          if [ -n "${{ needs.validate.outputs.playlist_items }}" ]; then CMD+=(--playlist-items "${{ needs.validate.outputs.playlist_items }}"); fi
+          if [ -n "${{ needs.validate.outputs.date_after }}" ]; then CMD+=(--dateafter "${{ needs.validate.outputs.date_after }}"); fi
+          CMD+=(-o "%(title)s [%(id)s].%(ext)s")
+          case "${{ needs.validate.outputs.mode }}" in
+            "bestaudio"*) CMD+=(-f "bestaudio/best" -x --audio-format "${{ needs.validate.outputs.audio_format }}" --audio-quality "${{ needs.validate.outputs.audio_quality }}") ;;
+            "bestvideo"*) CMD+=(-f "bestvideo/best") ;;
+            "formato-customizado"*) CMD+=(-f "${{ needs.validate.outputs.custom_format }}") ;;
+            *) CMD+=(-f "bestvideo+bestaudio/best" --merge-output-format mkv) ;;
+          esac
+          CMD+=("$URL")
+          echo "🚀 Retry 2: ${CMD[*]}"
+          "${CMD[@]}"
+      - name: 📤 Upload Artifact (Retry 2)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.artifact-name }}-retry2
+          path: downloads/**
+          retention-days: ${{ env.RETENTION_DAYS }}
+          compression-level: 6
+
+  retry-3:
+    name: 🔁 Retry 3/3 (Throttle Baixo)
+    needs: [validate, download, retry-2]
+    if: failure() && needs.retry-2.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: ⏳ Aguardar antes de retry final
+        run: sleep 120
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: 📦 Instalar
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -q --upgrade yt-dlp[default]
+      - name: ⬇️ Download (Retry 3 - Conservador)
+        env:
+          URL: ${{ needs.validate.outputs.url }}
+          MODE: ${{ needs.validate.outputs.mode }}
+          AUDIO_FMT: ${{ needs.validate.outputs.audio_format }}
+          AUDIO_QUAL: ${{ needs.validate.outputs.audio_quality }}
+          CUSTOM_FMT: ${{ needs.validate.outputs.custom_format }}
+          SPONSOR: ${{ needs.validate.outputs.sponsorblock }}
+          SUBTITLES: ${{ needs.validate.outputs.subtitles }}
+          SUB_LANGS: ${{ needs.validate.outputs.sub_langs }}
+          THUMB: ${{ needs.validate.outputs.thumbnail }}
+          META: ${{ needs.validate.outputs.metadata }}
+          CONCURRENT: '2'  # Menos fragments
+          THROTTLE: '1M'   # Throttle agressivo
+          PL_ITEMS: ${{ needs.validate.outputs.playlist_items }}
+          DATE_AFTER: ${{ needs.validate.outputs.date_after }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloads && cd downloads
+          CMD=(yt-dlp --concurrent-fragments 2 --retries 20 --fragment-retries 20 --throttled-rate 1M --no-warnings --max-filesize ${{ env.MAX_FILESIZE }})
+          if [ "${{ needs.validate.outputs.sponsorblock }}" = "true" ]; then CMD+=(--sponsorblock-remove all); fi
+          if [ "${{ needs.validate.outputs.subtitles }}" = "true" ]; then CMD+=(--write-subs --write-auto-subs --sub-langs "${{ needs.validate.outputs.sub_langs }}"); fi
+          if [ "${{ needs.validate.outputs.thumbnail }}" = "true" ]; then CMD+=(--write-thumbnail); fi
+          if [ "${{ needs.validate.outputs.metadata }}" = "true" ]; then CMD+=(--add-metadata --embed-thumbnail); fi
+          if [ -n "${{ needs.validate.outputs.playlist_items }}" ]; then CMD+=(--playlist-items "${{ needs.validate.outputs.playlist_items }}"); fi
+          if [ -n "${{ needs.validate.outputs.date_after }}" ]; then CMD+=(--dateafter "${{ needs.validate.outputs.date_after }}"); fi
+          CMD+=(-o "%(title)s [%(id)s].%(ext)s")
+          case "${{ needs.validate.outputs.mode }}" in
+            "bestaudio"*) CMD+=(-f "bestaudio/best" -x --audio-format "${{ needs.validate.outputs.audio_format }}" --audio-quality "${{ needs.validate.outputs.audio_quality }}") ;;
+            "bestvideo"*) CMD+=(-f "bestvideo/best") ;;
+            "formato-customizado"*) CMD+=(-f "${{ needs.validate.outputs.custom_format }}") ;;
+            *) CMD+=(-f "bestvideo+bestaudio/best" --merge-output-format mkv) ;;
+          esac
+          CMD+=("$URL")
+          echo "🚀 Retry 3 (conservador): ${CMD[*]}"
+          "${CMD[@]}"
+      - name: 📤 Upload Artifact (Retry 3)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.artifact-name }}-retry3
+          path: downloads/**
+          retention-days: ${{ env.RETENTION_DAYS }}
+          compression-level: 6
+
+  notify:
+    name: 🔔 Notificar Resultado
+    needs: [validate, download, retry-2, retry-3]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📊 Status Final
+        run: |
+          DOWNLOAD_STATUS="${{ needs.download.result }}"
+          RETRY2_STATUS="${{ needs.retry-2.result }}"
+          RETRY3_STATUS="${{ needs.retry-3.result }}"
+          
+          if [ "$DOWNLOAD_STATUS" = "success" ]; then
+            echo "✅ Sucesso na primeira tentativa"
+            FINAL_STATUS="success"
+          elif [ "$RETRY2_STATUS" = "success" ]; then
+            echo "✅ Sucesso na retry 2"
+            FINAL_STATUS="success"
+          elif [ "$RETRY3_STATUS" = "success" ]; then
+            echo "✅ Sucesso na retry 3"
+            FINAL_STATUS="success"
+          else
+            echo "❌ Todas tentativas falharam"
+            FINAL_STATUS="failure"
+          fi
+          
+          echo "final_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
+      
+      - name: 📝 Summary Final
+        run: |
+          echo "## 🏁 Resultado Final" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.status.outputs.final_status }}" = "success" ]; then
+            echo "✅ **DOWNLOAD CONCLUÍDO COM SUCESSO**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📦 **Artifact:** \`${{ needs.validate.outputs.artifact_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "🕐 **Disponível por:** ${{ env.RETENTION_DAYS }} dias" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📥 Baixar arquivo:" >> $GITHUB_STEP_SUMMARY
+            echo '```bash' >> $GITHUB_STEP_SUMMARY
+            echo "gh run download ${{ github.run_id }} --dir ./meus_downloads" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **DOWNLOAD FALHOU APÓS 3 TENTATIVAS**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Possíveis causas:" >> $GITHUB_STEP_SUMMARY
+            echo "- 🚫 Vídeo privado/geobloqueado/removido" >> $GITHUB_STEP_SUMMARY
+            echo "- 🌐 IP do GitHub bloqueado pelo YouTube (429/403)" >> $GITHUB_STEP_SUMMARY
+            echo "- 📁 Arquivo > 2GB (limite do GitHub Artifacts)" >> $GITHUB_STEP_SUMMARY
+            echo "- ⏱️ Timeout (3h max)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🔧 Soluções:" >> $GITHUB_STEP_SUMMARY
+            echo "- Tente modo **áudio apenas** (menor)" >> $GITHUB_STEP_SUMMARY
+            echo "- Use **throttle** (ex: 1M, 5M)" >> $GITHUB_STEP_SUMMARY
+            echo "- Tente **resolução menor** (720p/1080p)" >> $GITHUB_STEP_SUMMARY
+            echo "- Use **formato customizado** com IDs menores" >> $GITHUB_STEP_SUMMARY
+          fi
